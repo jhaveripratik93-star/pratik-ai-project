@@ -1,0 +1,13 @@
+Human-in-the-Loop Workflow
+
+1. User uploads documents.
+
+2. ChromaDB indexes content.
+
+3. User asks a question.
+
+4. Model retrieves relevant chunks → generates an answer.
+
+5. Guardrails validate output.
+
+6. Human reviews/edits before final submission. ✅
