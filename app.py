@@ -1,62 +1,180 @@
 import streamlit as st
-import os
+import time
+import base64
 from dotenv import load_dotenv
-from utils.file_loader import extract_text_from_files
-from utils.chroma_manager import setup_chroma, query_chroma
-from utils.safety import is_safe_response
-import google.generativeai as genai
+from langchain_google_genai import ChatGoogleGenerativeAI
+from typing import List
+from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
+from langchain.tools import tool, BaseTool
+from callbacks import AgentCallbackHandler
 
 load_dotenv()
 
-st.set_page_config(page_title="Human-in-the-Loop Chatbot", layout="wide")
+@tool
+def format_gemini_response(messages):
+    """
+    Extracts and formats the actual answer from a list of Gemini chat messages.
 
-api_key = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=api_key)
+    Args:
+        messages (list): List of messages returned by Gemini API (HumanMessage, AIMessage, ToolMessage, etc.)
 
-# --- Sidebar ---
-st.sidebar.header("Upload Knowledge Files")
-uploaded_files = st.sidebar.file_uploader(
-    "Upload multiple documents", type=["pdf", "docx", "csv", "txt"], accept_multiple_files=True
+    Returns:
+        str: Concatenated text of all AI responses.
+    """
+    formatted_text = []
+
+    for msg in messages:
+        # Human messages usually contain the user's input
+        if isinstance(msg, HumanMessage):
+            formatted_text.append(f"User: {msg.content if isinstance(msg.content, str) else ' '.join(msg.content)}")
+
+        # AIMessage can contain function calls or direct answers
+        elif isinstance(msg, AIMessage):
+            # If content is not empty
+            if msg.content:
+                formatted_text.append(f"AI: {msg.content}")
+            # If function_call exists
+            elif 'function_call' in msg.additional_kwargs:
+                fc = msg.additional_kwargs['function_call']
+                formatted_text.append(f"AI (Function Call: {fc.get('name')}): {fc.get('arguments')}")
+
+        # ToolMessage usually contains structured responses from tools
+        elif isinstance(msg, ToolMessage):
+            try:
+                import json
+                content = msg.content
+                # Try parsing JSON if possible
+                data = json.loads(content)
+                if "output" in data:
+                    formatted_text.append(f"AI (Tool Output): {data['output']}")
+            except Exception:
+                # fallback
+                formatted_text.append(f"AI (ToolMessage): {msg.content}")
+
+    # Join all messages with line breaks
+    return "\n".join(formatted_text)
+
+def find_tool_by_name(tools: List[BaseTool], tool_name: str) -> BaseTool:
+    for tool in tools:
+        if tool.name == tool_name:
+            return tool
+    raise ValueError(f"Tool wtih name {tool_name} not found")
+
+
+st.set_page_config(
+    page_title="network issue trouble shooter Style Chat",
+    layout="wide"
 )
 
-# --- Main UI ---
-st.title("🤖 AI Chatbot with Human-in-the-Loop & Guardrails")
+# -----------------------------
+# SESSION STATE INIT
+# -----------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-if uploaded_files:
-    with st.spinner("Processing uploaded files..."):
-        text_data = extract_text_from_files(uploaded_files)
-        chroma_client, collection = setup_chroma(text_data)
-    st.success("Files processed and indexed successfully!")
+if "uploaded_files" not in st.session_state:
+    st.session_state.uploaded_files = []
 
-# --- Chat Interface ---
-query = st.text_input("Ask a question about your uploaded files:")
-if st.button("Generate Answer"):
-    if not uploaded_files:
-        st.warning("Please upload at least one file first.")
-    elif not query.strip():
-        st.warning("Enter a question.")
+
+# -----------------------------
+# SIDEBAR — FILE UPLOADS
+# -----------------------------
+st.sidebar.title("📂 Uploaded Files")
+
+uploaded = st.sidebar.file_uploader(
+    "Upload multiple files",
+    type=["pdf", "txt", "docx", "xlsx", "csv", "json", "png", "jpg", "jpeg"],
+    accept_multiple_files=True,
+)
+
+if uploaded:
+    for file in uploaded:
+        st.session_state.uploaded_files.append(file)
+
+# Show uploaded files
+if len(st.session_state.uploaded_files) == 0:
+    st.sidebar.info("No files uploaded yet.")
+else:
+    for f in st.session_state.uploaded_files:
+        st.sidebar.write(f"📄 **{f.name}**")
+
+st.sidebar.markdown("---")
+
+
+# -----------------------------
+# MAIN CHAT AREA
+# -----------------------------
+st.title("💬 Network Issue troubleshooter")
+
+
+# Display chat history
+for message in st.session_state.messages:
+    if message["sender"] == "user":
+        st.markdown(f"**You:** {message['text']}")
     else:
-        # Retrieve context
-        docs = query_chroma(collection, query)
-        context = "\n\n".join(docs)
+        st.markdown(f"**AI:** {message['text']}")
 
-        prompt = f"Answer the question using the provided context. If not found, say 'Not found in documents.'\n\nContext:\n{context}\n\nQuestion: {query}"
+# -----------------------------
+# USER INPUT BOX
+# -----------------------------
+st.markdown("---")
+with st.form(key="chat_form", clear_on_submit=True):
+    user_input = st.text_input("Type your message…", key="input_msg")
+    submit_button = st.form_submit_button("Send")
 
-        model = genai.GenerativeModel("gemini-2.5-flash")
-        response = model.generate_content(prompt)
+def displayAiResponse(botResponse):
+    """
+    Displays the AI response in the Streamlit chat interface
+    and stores it in session_state for chat history.
+    """
+    # Append AI response to session state history
+    st.session_state.messages.append({"sender": "ai", "text": botResponse})
 
-        answer = response.text
+def fetchAIResponse(user_input):
+    # Start conversation    
+    messages = [HumanMessage(content = {user_input})]
+    while True:
+        ai_message = llm_with_tools.invoke(messages)
 
-        # Apply guardrails
-        if not is_safe_response(answer):
-            st.error("⚠️ The response contained unsafe or disallowed content.")
-        else:
-            # Human-in-the-loop confirmation
-            st.write("### ✍️ AI Suggested Answer")
-            st.write(answer)
+        # If the model decides to call tools, execute them and return results
+        tool_calls = getattr(ai_message, "tool_calls", None) or []
+        if len(tool_calls) > 0:
+            messages.append(ai_message)
+            for tool_call in tool_calls:
+                # tool_call is typically a dict with keys: id, type, name, args
+                tool_name = tool_call.get("name")
+                tool_args = tool_call.get("args", {})
+                tool_call_id = tool_call.get("id")
 
-            st.write("### ✅ Human Review")
-            human_feedback = st.text_area("Edit or approve the answer before sending:", value=answer)
-            if st.button("Submit Final Answer"):
-                st.success("✅ Final answer approved by human:")
-                st.write(human_feedback)
+                tool_to_use = find_tool_by_name(tools, tool_name)
+                observation = tool_to_use.invoke(tool_args)
+                print(f"observation={observation}")
+
+                messages.append(
+                    ToolMessage(content=str(observation), tool_call_id=tool_call_id)
+                )
+            # Continue loop to allow the model to use the observations
+            continue
+
+        # No tool calls -> final answer
+        output = ai_message.content
+        print("message to be shown the user")
+        print(output[0]['text'])
+        displayAiResponse(output[0]['text'])
+        break
+
+# Handle form submission
+if submit_button and user_input:
+    # Add user message
+    st.session_state.messages.append({"sender": "user", "text": user_input})
+    
+    # Initialize LLM and tools
+    tools = [format_gemini_response]
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, callbacks=[AgentCallbackHandler()])
+    llm_with_tools = llm.bind_tools(tools)
+    
+    # Show typing indicator and get AI response
+    with st.spinner("AI is thinking…"):
+        fetchAIResponse(user_input)
+    
+    st.rerun()
