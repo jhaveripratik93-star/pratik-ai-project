@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 import google.generativeai as genai
 
 load_dotenv()
