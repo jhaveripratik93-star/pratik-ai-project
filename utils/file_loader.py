@@ -3,6 +3,13 @@ import pandas as pd
 from PyPDF2 import PdfReader
 from docx import Document
 
+def load_files(uploaded_files):
+    files = []
+    for uploaded_file in uploaded_files:
+        file = io.BytesIO(uploaded_file.read())
+        files.append(file)
+    return files
+
 def extract_text_from_files(files):
     text_data = []
     for file in files:
