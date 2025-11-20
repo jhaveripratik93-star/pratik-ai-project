@@ -8,6 +8,7 @@ def is_safe(text: str) -> bool:
         r"(?i)ssn",
         r"(?i)violence",
         r"(?i)hate",
-        r"(?i)terror"
+        r"(?i)terror",
+        r"(?i)delete db"
     ]
     return not any(re.search(p, text) for p in bad_patterns)

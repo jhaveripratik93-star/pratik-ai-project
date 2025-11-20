@@ -1,0 +1,5 @@
+Create an account in pinecone.io
+
+https://app.pinecone.io/organizations/-OeRsbtMkztwrzxSXEwX/projects/963d1777-837e-4284-bd34-3797e88c3a65/indexes/medium-blogs-embeding-models/browser
+
+created an account in tavily - https://app.tavily.com/home
