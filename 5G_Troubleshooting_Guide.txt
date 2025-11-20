@@ -1,0 +1,35 @@
+
+5G TROUBLESHOOTING GUIDE
+------------------------
+
+1. Radio Issues
+   - Check RSRP/RSRQ/SINR levels.
+   - Validate gNB configuration and PCI collisions.
+   - Verify UE RF capability and antenna alignment.
+
+2. Core Network Issues
+   - Check AMF/SMF/NSSF logs for registration failures.
+   - Validate UPF reachability and PFCP session setup.
+   - Inspect N2/N3 interface connectivity.
+
+3. Mobility Issues
+   - Analyze Handover Success Rate.
+   - Check Xn and N2 handover logs.
+   - Evaluate TAC and tracking area mismatch problems.
+
+4. KPI Degradation
+   - Monitor accessibility, retainability, and mobility KPIs.
+   - Check system load, CPU utilization, and memory leaks.
+
+5. Throughput Issues
+   - Validate user plane routing.
+   - Check QoS and slicing configuration.
+   - Confirm correct bandwidth part (BWP) behavior.
+
+6. Call Drops
+   - Inspect RRC re-establishment causes.
+   - Look for Layer 2 retransmissions and HARQ failures.
+
+7. VoNR Issues
+   - Validate EPS fallback behavior.
+   - Inspect IMS registration and SIP signaling.

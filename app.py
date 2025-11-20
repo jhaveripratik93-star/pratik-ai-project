@@ -1,5 +1,6 @@
 import streamlit as st
 import time
+import os
 import base64
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -7,6 +8,14 @@ from typing import List
 from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
 from langchain.tools import tool, BaseTool
 from callbacks import AgentCallbackHandler
+from utils.ingestion import load_files
+from utils.guardrails import validate_user_input, sanitize_input, is_network_related
+from langchain_community.vectorstores import FAISS
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_classic import hub
+
 
 load_dotenv()
 
@@ -81,25 +90,81 @@ if "uploaded_files" not in st.session_state:
 # -----------------------------
 st.sidebar.title("📂 Uploaded Files")
 
+# Hide default file display with comprehensive CSS
+st.sidebar.markdown("""
+<style>
+.uploadedFile, .stFileUploader > div > div > div > div:nth-child(2) {
+    display: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 uploaded = st.sidebar.file_uploader(
     "Upload multiple files",
-    type=["pdf", "txt", "docx", "xlsx", "csv", "json", "png", "jpg", "jpeg"],
+    type=["pdf", "txt", "docx", "csv"],
     accept_multiple_files=True,
+    key="file_uploader"
 )
 
+# Handle new file uploads (avoid duplicates)
 if uploaded:
+    allowed_extensions = ['.pdf', '.txt', '.docx', '.csv']
+    existing_names = [f.name for f in st.session_state.uploaded_files]
+    new_files_added = False
+    invalid_files = []
+    
     for file in uploaded:
-        st.session_state.uploaded_files.append(file)
+        file_ext = '.' + file.name.split('.')[-1].lower()
+        if file_ext not in allowed_extensions:
+            invalid_files.append(file.name)
+        elif file.name not in existing_names:
+            st.session_state.uploaded_files.append(file)
+            existing_names.append(file.name)
+            new_files_added = True
+    
+    if invalid_files:
+        st.sidebar.error(f"❌ Invalid file format(s): {', '.join(invalid_files)}. Only PDF, TXT, DOCX, CSV files are allowed.")
+    
+    if new_files_added:
+        st.rerun()
 
-# Show uploaded files
+print("new file names",st.session_state.uploaded_files)
+
+if len(st.session_state.uploaded_files) > 0:
+    st.sidebar.success("✅ Files indexed!")
+
+file_details = st.session_state.uploaded_files
+load_files_status = load_files(file_details)
+
+# Show uploaded files with delete option
 if len(st.session_state.uploaded_files) == 0:
     st.sidebar.info("No files uploaded yet.")
 else:
-    for f in st.session_state.uploaded_files:
-        st.sidebar.write(f"📄 **{f.name}**")
+    files_to_remove = []
+    for i, f in enumerate(st.session_state.uploaded_files):
+        col1, col2 = st.sidebar.columns([3, 1])
+        col1.write(f"📄 **{f.name}**")
+        if col2.button("❌", key=f"del_{f.name}_{i}"):
+            files_to_remove.append(f)
+    
+    # Remove files after iteration
+    if files_to_remove:
+        for file_to_remove in files_to_remove:
+            if file_to_remove in st.session_state.uploaded_files:
+                st.session_state.uploaded_files.remove(file_to_remove)
+        st.rerun()
+
+# Clear buttons
+st.sidebar.markdown("---")
+if st.sidebar.button("🗑️ Clear All Files"):
+    st.session_state.uploaded_files = []
+    st.rerun()
+
+if st.sidebar.button("💬 Clear Chat"):
+    st.session_state.messages = []
+    st.rerun()
 
 st.sidebar.markdown("---")
-
 
 # -----------------------------
 # MAIN CHAT AREA
@@ -131,50 +196,73 @@ def displayAiResponse(botResponse):
     st.session_state.messages.append({"sender": "ai", "text": botResponse})
 
 def fetchAIResponse(user_input):
-    # Start conversation    
-    messages = [HumanMessage(content = {user_input})]
-    while True:
-        ai_message = llm_with_tools.invoke(messages)
-
-        # If the model decides to call tools, execute them and return results
-        tool_calls = getattr(ai_message, "tool_calls", None) or []
-        if len(tool_calls) > 0:
-            messages.append(ai_message)
-            for tool_call in tool_calls:
-                # tool_call is typically a dict with keys: id, type, name, args
-                tool_name = tool_call.get("name")
-                tool_args = tool_call.get("args", {})
-                tool_call_id = tool_call.get("id")
-
-                tool_to_use = find_tool_by_name(tools, tool_name)
-                observation = tool_to_use.invoke(tool_args)
-                print(f"observation={observation}")
-
-                messages.append(
-                    ToolMessage(content=str(observation), tool_call_id=tool_call_id)
-                )
-            # Continue loop to allow the model to use the observations
+    # Check if any FAISS indices exist
+    indices = ["faiss_index_pdf", "faiss_index_docx", "faiss_index_txt", "faiss_index_csv"]
+    existing_indices = [idx for idx in indices if os.path.exists(f"{idx}.faiss") or os.path.exists(idx)]
+    
+    if not existing_indices:
+        displayAiResponse("Please upload and process some files first before asking questions.")
+        return
+    
+    from langchain_huggingface import HuggingFaceEmbeddings
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    
+    # Load existing vectorstores
+    vectorstores = []
+    for idx in existing_indices:
+        try:
+            vs = FAISS.load_local(idx, embeddings, allow_dangerous_deserialization=True)
+            vectorstores.append(vs)
+        except:
             continue
+    
+    if not vectorstores:
+        displayAiResponse("No valid document indices found. Please upload files first.")
+        return
+    
+    # Merge all vectorstores
+    main_vectorstore = vectorstores[0]
+    for vs in vectorstores[1:]:
+        main_vectorstore.merge_from(vs)
+    
+    retriever = main_vectorstore.as_retriever()
+    retrieval_qa_chat_prompt = hub.pull("langchain-ai/retrieval-qa-chat")
+    combine_docs_chain = create_stuff_documents_chain(ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0), retrieval_qa_chat_prompt)
+    retrieval_chain = create_retrieval_chain(retriever, combine_docs_chain)
+    res = retrieval_chain.invoke({"input": user_input})
+    displayAiResponse(res['answer'])
 
-        # No tool calls -> final answer
-        output = ai_message.content
-        print("message to be shown the user")
-        print(output[0]['text'])
-        displayAiResponse(output[0]['text'])
-        break
+
 
 # Handle form submission
 if submit_button and user_input:
-    # Add user message
-    st.session_state.messages.append({"sender": "user", "text": user_input})
-    
-    # Initialize LLM and tools
-    tools = [format_gemini_response]
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, callbacks=[AgentCallbackHandler()])
-    llm_with_tools = llm.bind_tools(tools)
-    
-    # Show typing indicator and get AI response
-    with st.spinner("AI is thinking…"):
-        fetchAIResponse(user_input)
-    
-    st.rerun()
+    # Check if files are uploaded
+    if len(st.session_state.uploaded_files) == 0:
+        st.error("❌ Please upload at least one file before asking questions.")
+    else:
+        # Validate user input
+        is_valid, error_message = validate_user_input(user_input)
+        
+        if not is_valid:
+            st.error(error_message)
+        else:
+            # Sanitize input
+            sanitized_input = sanitize_input(user_input)
+            
+            # Check if network-related (optional warning)
+            if not is_network_related(sanitized_input):
+                st.warning("⚠️ This question doesn't seem network-related. For best results, ask about network troubleshooting.")
+            
+            # Add user message
+            st.session_state.messages.append({"sender": "user", "text": sanitized_input})
+            
+            # Initialize LLM and tools
+            tools = [format_gemini_response]
+            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, callbacks=[AgentCallbackHandler()])
+            llm_with_tools = llm.bind_tools(tools)
+            
+            # Show typing indicator and get AI response
+            with st.spinner("AI is thinking…"):
+                fetchAIResponse(sanitized_input)
+            
+            st.rerun()

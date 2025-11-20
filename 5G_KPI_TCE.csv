@@ -1,0 +1,6 @@
+KPI Name,KPI Description,Typical Threshold,Impact (TCE)
+Call Setup Success Rate,Percentage of successful call setups,>98%,Accessibility
+E2E Latency,Latency from UE to Data Network,<10 ms,Latency
+DL Throughput,User downlink speed,>200 Mbps,Experience
+UL Throughput,User uplink speed,>50 Mbps,Experience
+Handover Success Rate,Successful handovers over total attempted,>97%,Mobility
