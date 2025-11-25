@@ -14,10 +14,118 @@ from langchain_community.vectorstores import FAISS
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
-from langchain_classic import hub
+from langchain_core.prompts import PromptTemplate
 
 
 load_dotenv()
+
+import json
+import re
+import plotly.graph_objects as go
+import streamlit as st
+
+def extract_code_blocks(text):
+    """Extract all ``` blocks and inline fig = {...} definitions."""
+    blocks = []
+
+    # Capture fenced blocks
+    fenced = re.findall(r"```(?:json|python|js|plotly)?\s*(.*?)```", text, flags=re.DOTALL)
+    blocks.extend(fenced)
+
+    # Capture inline `fig = {...}`
+    inline = re.findall(r"fig\s*=\s*(\{.*?\})", text, flags=re.DOTALL)
+    blocks.extend(inline)
+
+    return blocks
+
+
+def js_to_json(clean_js):
+    """Convert JS-like Plotly dict → JSON-friendly Python dict."""
+    return (
+        clean_js.replace("'", '"')
+                .replace("True", "true")
+                .replace("False", "false")
+                .replace("None", "null")
+                .replace("new Date", "")
+                .replace("toLocaleString()", "")
+                .replace(";", "")
+    )
+
+
+def safe_json_loads(text):
+    """Load JSON or fallback to eval() with protection."""
+    try:
+        return json.loads(text)
+    except Exception:
+        try:
+            return eval(text, {"__builtins__": None}, {})
+        except Exception:
+            return None
+
+
+def build_figure_from_dict(fig_dict, df=None):
+    """Convert parsed JSON/Python dict into a Plotly Figure."""
+    fig = go.Figure()
+
+    traces = fig_dict.get("data", [])
+
+    for tr in traces:
+        # Use VM data if provided
+        if df is not None:
+            x_vals = [v[0] for v in df]
+            y_vals = [v[1] for v in df]
+        else:
+            x_vals = tr.get("x", [])
+            y_vals = tr.get("y", [])
+
+        fig.add_trace(
+            go.Scatter(
+                x=x_vals,
+                y=y_vals,
+                mode=tr.get("mode", "lines"),
+                name=tr.get("name", "Series")
+            )
+        )
+
+    fig.update_layout(**fig_dict.get("layout", {}))
+    return fig
+
+
+def render_plotly_from_ai_text(ai_text, df=None):
+    """
+    Detect multiple Plotly snippets in AI response,
+    convert them to Python, and render inside Streamlit.
+    Returns True if at least 1 plot was rendered.
+    """
+    blocks = extract_code_blocks(ai_text)
+
+    if not blocks:
+        return False
+
+    figs = []
+
+    for raw_block in blocks:
+        cleaned = js_to_json(raw_block.strip())
+        fig_dict = safe_json_loads(cleaned)
+
+        if not fig_dict or "data" not in fig_dict:
+            continue
+
+        figs.append(build_figure_from_dict(fig_dict, df=df))
+
+    if not figs:
+        return False
+
+    # If multiple charts → Tab UI
+    if len(figs) > 1:
+        tabs = st.tabs([f"Chart {i+1}" for i in range(len(figs))])
+        for tab, chart in zip(tabs, figs):
+            with tab:
+                st.plotly_chart(chart, use_container_width=True)
+    else:
+        st.plotly_chart(figs[0], use_container_width=True)
+
+    return True
 
 @tool
 def format_gemini_response(messages):
@@ -83,6 +191,9 @@ if "messages" not in st.session_state:
 
 if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = []
+
+if "vm_history" not in st.session_state:
+    st.session_state.vm_history = []
 
 
 # -----------------------------
@@ -178,6 +289,8 @@ for message in st.session_state.messages:
         st.markdown(f"**You:** {message['text']}")
     else:
         st.markdown(f"**AI:** {message['text']}")
+        
+
 
 # -----------------------------
 # USER INPUT BOX
@@ -187,15 +300,118 @@ with st.form(key="chat_form", clear_on_submit=True):
     user_input = st.text_input("Type your message…", key="input_msg")
     submit_button = st.form_submit_button("Send")
 
-def displayAiResponse(botResponse):
-    """
-    Displays the AI response in the Streamlit chat interface
-    and stores it in session_state for chat history.
-    """
-    # Append AI response to session state history
-    st.session_state.messages.append({"sender": "ai", "text": botResponse})
+def render_vm_chart(query_result):
+    """Render Plotly chart from VM query result data."""
+    try:
+        import plotly.graph_objects as go
+        import datetime
+        
+        result_data = query_result["data"]["result"]
+        if result_data:
+            fig = go.Figure()
+            
+            for series in result_data:
+                if "values" in series:
+                    timestamps = [float(val[0]) for val in series["values"]]
+                    values = [float(val[1]) for val in series["values"]]
+                    dates = [datetime.datetime.fromtimestamp(ts) for ts in timestamps]
+                    
+                    metric_name = series.get("metric", {}).get("__name__", "Unknown Metric")
+                    fig.add_trace(go.Scatter(
+                        x=dates,
+                        y=values,
+                        mode='lines+markers',
+                        name=metric_name
+                    ))
+            
+            fig.update_layout(
+                title="Victoria Metrics Query Results",
+                xaxis_title="Time",
+                yaxis_title="Value",
+                height=400
+            )
+            
+            st.plotly_chart(fig, width=True)
+            
+    except Exception as e:
+        st.error(f"Error creating chart: {str(e)}")
+
+def displayAiResponse(botResponse, plot_data=None):
+    """Display AI response and optional chart."""
+    st.session_state.messages.append({
+        "sender": "ai",
+        "text": botResponse,
+        "plot_data": plot_data
+    })
+    
+    st.markdown(f"**AI:** {botResponse}")
+    
+    # Render VM chart if available
+    if plot_data and plot_data.get("query_result", {}).get("status") == "success":
+        render_vm_chart(plot_data["query_result"])
+
+
+# def displayAiResponse(botResponse, plot_data=None):
+#     """
+#     Displays the AI response in the Streamlit chat interface
+#     and stores it in session_state for chat history.
+#     """
+#     # Append AI response to session state history
+#     st.session_state.messages.append({"sender": "ai", "text": botResponse, "plot_data": plot_data})
 
 def fetchAIResponse(user_input):
+    # Check if user input contains VM or Victoria Metrics keywords
+    vm_keywords = ['vm', 'victoria metrics', 'victoriametrics', 'metrics', 'monitoring']
+    if any(keyword in user_input.lower() for keyword in vm_keywords):
+        try:
+            import io
+            import sys
+            import json
+            from vm_dbconnection import vm_dbconnectionMain, run_metrics_query, generate_plotly_code_with_groq, generate_metrics_ql_query
+            
+            # Get MetricsQL query and run it
+            metrics_ql_query = generate_metrics_ql_query(user_input)
+            query_result = run_metrics_query(metrics_ql_query, time_range="1h", step="5m")
+            
+            # Generate plot code
+            plotly_code = generate_plotly_code_with_groq(json.dumps(query_result.get("data", {})), user_input)
+            
+            # Capture text output and get results with history
+            old_stdout = sys.stdout
+            sys.stdout = captured_output = io.StringIO()
+            
+            # Import the modified function
+            from vm_dbconnection import vm_dbconnectionMain
+            vm_results = vm_dbconnectionMain([user_input], st.session_state.vm_history)
+            
+            sys.stdout = old_stdout
+            vm_output = captured_output.getvalue()
+            
+            # Store results in history
+            if vm_results:
+                st.session_state.vm_history.extend(vm_results)
+                # Keep only last 10 entries
+                st.session_state.vm_history = st.session_state.vm_history[-10:]
+            
+            # Prepare plot data if valid
+            plot_data = None
+            if plotly_code and plotly_code != "NO_PLOT":
+                plot_data = {
+                    "query_result": query_result,
+                    "plotly_code": plotly_code
+                }
+            
+            # Display results with plot
+            response_text = f"**Victoria Metrics Query Results:**\n\n{vm_output}"
+            displayAiResponse(response_text, plot_data)
+            
+            # Chart will be rendered by displayAiResponse function
+            
+            return
+        except Exception as e:
+            displayAiResponse(f"Error processing VM query: {str(e)}")
+            return
+    
     # Check if any FAISS indices exist
     indices = ["faiss_index_pdf", "faiss_index_docx", "faiss_index_txt", "faiss_index_csv"]
     existing_indices = [idx for idx in indices if os.path.exists(f"{idx}.faiss") or os.path.exists(idx)]
@@ -205,6 +421,8 @@ def fetchAIResponse(user_input):
         return
     
     from langchain_huggingface import HuggingFaceEmbeddings
+    from langchain_core.prompts import PromptTemplate
+    
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     
     # Load existing vectorstores
@@ -225,10 +443,35 @@ def fetchAIResponse(user_input):
     for vs in vectorstores[1:]:
         main_vectorstore.merge_from(vs)
     
-    retriever = main_vectorstore.as_retriever()
-    retrieval_qa_chat_prompt = hub.pull("langchain-ai/retrieval-qa-chat")
-    combine_docs_chain = create_stuff_documents_chain(ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0), retrieval_qa_chat_prompt)
+    # Enhanced retriever with better parameters
+    retriever = main_vectorstore.as_retriever(
+        search_type="mmr",  # Maximum Marginal Relevance for diversity
+        search_kwargs={"k": 5, "fetch_k": 10}  # Retrieve more relevant chunks
+    )
+    
+    # Custom prompt for better accuracy
+    custom_prompt = PromptTemplate.from_template(
+        """You are a network troubleshooting expert. Use the following context to answer the question accurately.
+        Search for the answer in all the uploaded documents. Give the best combined result for the user query
+        
+        Context: {context}
+        
+        Question: {input}
+        
+        Instructions:
+        1. Answer based ONLY on the provided context
+        2. If the context doesn't contain relevant information, say "I don't have enough information in the uploaded documents to answer this question."
+        3. Provide specific, actionable troubleshooting steps when possible
+        4. Include relevant technical details from the context
+        5. Be concise but comprehensive
+        
+        Answer:"""
+    )
+    
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)  # Slightly higher temp for better responses
+    combine_docs_chain = create_stuff_documents_chain(llm, custom_prompt)
     retrieval_chain = create_retrieval_chain(retriever, combine_docs_chain)
+    
     res = retrieval_chain.invoke({"input": user_input})
     displayAiResponse(res['answer'])
 
@@ -245,6 +488,12 @@ if submit_button and user_input:
         
         if not is_valid:
             st.error(error_message)
+        elif user_input.lower() == "exit":
+            st.session_state.messages.append({"sender": "ai", "text": "Goodbye!"})
+        elif user_input.lower() == "show files":
+            st.session_state.messages.append({"sender": "ai", "text": "Uploaded files: " + ", ".join([f.name for f in st.session_state.uploaded_files])})
+        elif user_input.lower() == "show history":
+            st.session_state.messages.append({"sender": "ai", "text": "Chat history: " + ", ".join([msg['text'] for msg in st.session_state.messages])})
         else:
             # Sanitize input
             sanitized_input = sanitize_input(user_input)
@@ -258,7 +507,7 @@ if submit_button and user_input:
             
             # Initialize LLM and tools
             tools = [format_gemini_response]
-            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, callbacks=[AgentCallbackHandler()])
+            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2, callbacks=[AgentCallbackHandler()])
             llm_with_tools = llm.bind_tools(tools)
             
             # Show typing indicator and get AI response
