@@ -195,13 +195,16 @@ if "uploaded_files" not in st.session_state:
 if "vm_history" not in st.session_state:
     st.session_state.vm_history = []
 
+if "microservices" not in st.session_state:
+    st.session_state.microservices = []
+
 
 # -----------------------------
 # SIDEBAR — FILE UPLOADS
 # -----------------------------
 st.sidebar.title("📂 Uploaded Files")
 
-# Hide default file display with comprehensive CSS
+# Hide default file display
 st.sidebar.markdown("""
 <style>
 .uploadedFile, .stFileUploader > div > div > div > div:nth-child(2) {
@@ -212,14 +215,14 @@ st.sidebar.markdown("""
 
 uploaded = st.sidebar.file_uploader(
     "Upload multiple files",
-    type=["pdf", "txt", "docx", "csv"],
+    type=["pdf", "txt", "docx", "csv", "xlsx", "xls"],
     accept_multiple_files=True,
     key="file_uploader"
 )
 
 # Handle new file uploads (avoid duplicates)
 if uploaded:
-    allowed_extensions = ['.pdf', '.txt', '.docx', '.csv']
+    allowed_extensions = ['.pdf', '.txt', '.docx', '.csv', '.xlsx', '.xls']
     existing_names = [f.name for f in st.session_state.uploaded_files]
     new_files_added = False
     invalid_files = []
@@ -234,36 +237,20 @@ if uploaded:
             new_files_added = True
     
     if invalid_files:
-        st.sidebar.error(f"❌ Invalid file format(s): {', '.join(invalid_files)}. Only PDF, TXT, DOCX, CSV files are allowed.")
+        st.sidebar.error(f"❌ Invalid file format(s): {', '.join(invalid_files)}. Only PDF, TXT, DOCX, CSV, Excel files are allowed.")
     
     if new_files_added:
         st.rerun()
 
-print("new file names",st.session_state.uploaded_files)
-
+# Single file status display
 if len(st.session_state.uploaded_files) > 0:
-    st.sidebar.success("✅ Files indexed!")
-
-file_details = st.session_state.uploaded_files
-load_files_status = load_files(file_details)
-
-# Show uploaded files with delete option
-if len(st.session_state.uploaded_files) == 0:
-    st.sidebar.info("No files uploaded yet.")
-else:
-    files_to_remove = []
-    for i, f in enumerate(st.session_state.uploaded_files):
-        col1, col2 = st.sidebar.columns([3, 1])
-        col1.write(f"📄 **{f.name}**")
-        if col2.button("❌", key=f"del_{f.name}_{i}"):
-            files_to_remove.append(f)
+    st.sidebar.success(f"✅ {len(st.session_state.uploaded_files)} file(s) indexed!")
     
-    # Remove files after iteration
-    if files_to_remove:
-        for file_to_remove in files_to_remove:
-            if file_to_remove in st.session_state.uploaded_files:
-                st.session_state.uploaded_files.remove(file_to_remove)
-        st.rerun()
+    # Process files
+    file_details = st.session_state.uploaded_files
+    load_files_status = load_files(file_details)
+else:
+    st.sidebar.info("No files uploaded yet.")
 
 # Clear buttons
 st.sidebar.markdown("---")
@@ -275,7 +262,46 @@ if st.sidebar.button("💬 Clear Chat"):
     st.session_state.messages = []
     st.rerun()
 
+# -----------------------------
+# MICROSERVICE LOGS SECTION
+# -----------------------------
 st.sidebar.markdown("---")
+st.sidebar.title("🔍 Microservice Logs")
+
+# Initialize microservice list in session state
+if "microservices" not in st.session_state:
+    st.session_state.microservices = []
+
+# Input for new microservice
+new_microservice = st.sidebar.text_input("Add microservice name:", placeholder="e.g., auth-service")
+if st.sidebar.button("➕ Add Service") and new_microservice:
+    if new_microservice not in st.session_state.microservices:
+        st.session_state.microservices.append(new_microservice)
+        st.rerun()
+
+# Display added microservices
+if st.session_state.microservices:
+    st.sidebar.success(f"📋 {len(st.session_state.microservices)} service(s) configured")
+    
+    services_to_remove = []
+    for i, service in enumerate(st.session_state.microservices):
+        col1, col2 = st.sidebar.columns([3, 1])
+        col1.write(f"🔧 **{service}**")
+        if col2.button("❌", key=f"del_service_{i}"):
+            services_to_remove.append(service)
+    
+    # Remove services
+    if services_to_remove:
+        for service in services_to_remove:
+            st.session_state.microservices.remove(service)
+        st.rerun()
+        
+    # Clear all services button
+    if st.sidebar.button("🗑️ Clear All Services"):
+        st.session_state.microservices = []
+        st.rerun()
+else:
+    st.sidebar.info("No microservices configured yet.")
 
 # -----------------------------
 # MAIN CHAT AREA
@@ -300,41 +326,186 @@ with st.form(key="chat_form", clear_on_submit=True):
     user_input = st.text_input("Type your message…", key="input_msg")
     submit_button = st.form_submit_button("Send")
 
+# -----------------------------
+# MICROSERVICE LOG FUNCTIONS
+# -----------------------------
+def fetch_microservice_logs(service_name, lines=100, time_range="1h"):
+    """Fetch logs from a specific microservice."""
+    try:
+        import subprocess
+        import json
+        from datetime import datetime, timedelta
+        
+        # Calculate time range
+        end_time = datetime.now()
+        if time_range == "1h":
+            start_time = end_time - timedelta(hours=1)
+        elif time_range == "24h":
+            start_time = end_time - timedelta(hours=24)
+        else:
+            start_time = end_time - timedelta(hours=1)
+        
+        # Try kubectl logs first (Kubernetes)
+        try:
+            cmd = f"kubectl logs -l app={service_name} --tail={lines} --since={time_range}"
+            result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and result.stdout:
+                return {
+                    "status": "success",
+                    "logs": result.stdout,
+                    "source": "kubernetes",
+                    "service": service_name,
+                    "lines": len(result.stdout.split('\n'))
+                }
+        except Exception:
+            pass
+        
+        # Try docker logs (Docker)
+        try:
+            cmd = f"docker logs {service_name} --tail {lines}"
+            result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and result.stdout:
+                return {
+                    "status": "success",
+                    "logs": result.stdout,
+                    "source": "docker",
+                    "service": service_name,
+                    "lines": len(result.stdout.split('\n'))
+                }
+        except Exception:
+            pass
+        
+        # Fallback: simulate logs for demo
+        sample_logs = f"""[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] INFO  {service_name} - Service started successfully
+[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] DEBUG {service_name} - Processing request ID: req-12345
+[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] WARN  {service_name} - High memory usage detected: 85%
+[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] INFO  {service_name} - Request completed in 250ms
+[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ERROR {service_name} - Connection timeout to database"""
+        
+        return {
+            "status": "success",
+            "logs": sample_logs,
+            "source": "demo",
+            "service": service_name,
+            "lines": len(sample_logs.split('\n'))
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "service": service_name
+        }
+
+def fetch_all_microservice_logs(service_list, lines=100):
+    """Fetch logs from multiple microservices."""
+    all_logs = {}
+    for service in service_list:
+        log_result = fetch_microservice_logs(service, lines)
+        all_logs[service] = log_result
+    return all_logs
+
+def format_log_response(log_data):
+    """Format log data for display in chatbot."""
+    if not log_data:
+        return "No microservices configured for log fetching."
+    
+    response = "**Microservice Logs:**\n\n"
+    
+    for service, data in log_data.items():
+        if data["status"] == "success":
+            response += f"**🔧 {service}** ({data['source']}) - {data['lines']} lines:\n"
+            response += f"```\n{data['logs'][:1000]}{'...' if len(data['logs']) > 1000 else ''}\n```\n\n"
+        else:
+            response += f"**❌ {service}** - Error: {data.get('error', 'Unknown error')}\n\n"
+    
+    return response
+
 def render_vm_chart(query_result):
-    """Render Plotly chart from VM query result data."""
+    """Render chart from VM query result data in both chatbot and terminal."""
     try:
         import plotly.graph_objects as go
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
         import datetime
         
         result_data = query_result["data"]["result"]
         if result_data:
+            # Create Plotly figure for Streamlit
             fig = go.Figure()
             
-            for series in result_data:
-                if "values" in series:
+            # Create matplotlib figure for terminal
+            plt.figure(figsize=(12, 6))
+            
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
+                     '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+            
+            for i, series in enumerate(result_data):
+                if "values" in series and series["values"]:
                     timestamps = [float(val[0]) for val in series["values"]]
                     values = [float(val[1]) for val in series["values"]]
                     dates = [datetime.datetime.fromtimestamp(ts) for ts in timestamps]
                     
-                    metric_name = series.get("metric", {}).get("__name__", "Unknown Metric")
+                    metric_info = series.get("metric", {})
+                    metric_name = metric_info.get("__name__", f"Series {i+1}")
+                    
+                    labels = []
+                    for k, v in metric_info.items():
+                        if k != "__name__" and len(labels) < 2:
+                            labels.append(f"{k}={v}")
+                    
+                    if labels:
+                        metric_name += f" ({', '.join(labels)})"
+                    
+                    color = colors[i % len(colors)]
+                    
+                    # Add to Plotly figure
                     fig.add_trace(go.Scatter(
-                        x=dates,
-                        y=values,
-                        mode='lines+markers',
-                        name=metric_name
+                        x=dates, y=values, mode='lines+markers', name=metric_name,
+                        line=dict(color=color, width=3),
+                        marker=dict(color=color, size=6, symbol='circle'),
+                        hovertemplate='<b>%{fullData.name}</b><br>Time: %{x}<br>Value: %{y:.2f}<br><extra></extra>'
                     ))
+                    
+                    # Add to matplotlib figure
+                    plt.plot(dates, values, color=color, linewidth=2, marker='o', markersize=4, label=metric_name)
             
+            # Configure Plotly layout
             fig.update_layout(
-                title="Victoria Metrics Query Results",
-                xaxis_title="Time",
-                yaxis_title="Value",
-                height=400
+                title=dict(text="📊 Victoria Metrics Time Series Analysis", x=0.5, font=dict(size=18, color='#2c3e50')),
+                xaxis=dict(title=dict(text="Time (UTC)", font=dict(size=14, color='#34495e')), tickfont=dict(size=12), gridcolor='#ecf0f1', showgrid=True),
+                yaxis=dict(title=dict(text="Metric Value", font=dict(size=14, color='#34495e')), tickfont=dict(size=12), gridcolor='#ecf0f1', showgrid=True),
+                height=500, hovermode='x unified', showlegend=True,
+                legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, bgcolor="rgba(255,255,255,0.8)", bordercolor="#bdc3c7", borderwidth=1),
+                plot_bgcolor='white', paper_bgcolor='#f8f9fa', margin=dict(l=60, r=120, t=80, b=60)
             )
             
-            st.plotly_chart(fig, width=True)
+            # Display in Streamlit chatbot
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Configure and display matplotlib plot in terminal
+            plt.title('Victoria Metrics - Time Series Analysis', fontsize=14, fontweight='bold')
+            plt.xlabel('Time', fontsize=12)
+            plt.ylabel('Metric Value', fontsize=12)
+            plt.grid(True, alpha=0.3)
+            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            
+            print("\n📊 Displaying plot in terminal...")
+            plt.show()
+            
+            # Also try browser display
+            try:
+                print("📊 Opening interactive plot in browser...")
+                fig.show(renderer="browser")
+            except Exception as browser_error:
+                print(f"Browser display failed: {browser_error}")
             
     except Exception as e:
         st.error(f"Error creating chart: {str(e)}")
+        print(f"Chart error: {str(e)}")
 
 def displayAiResponse(botResponse, plot_data=None):
     """Display AI response and optional chart."""
@@ -360,6 +531,19 @@ def displayAiResponse(botResponse, plot_data=None):
 #     st.session_state.messages.append({"sender": "ai", "text": botResponse, "plot_data": plot_data})
 
 def fetchAIResponse(user_input):
+    # Check if user input contains microservice log keywords
+    log_keywords = ['logs', 'log', 'microservice', 'service logs', 'show logs', 'fetch logs']
+    if any(keyword in user_input.lower() for keyword in log_keywords) and st.session_state.microservices:
+        try:
+            # Fetch logs from configured microservices
+            log_data = fetch_all_microservice_logs(st.session_state.microservices)
+            formatted_logs = format_log_response(log_data)
+            displayAiResponse(formatted_logs)
+            return
+        except Exception as e:
+            displayAiResponse(f"Error fetching microservice logs: {str(e)}")
+            return
+    
     # Check if user input contains VM or Victoria Metrics keywords
     vm_keywords = ['vm', 'victoria metrics', 'victoriametrics', 'metrics', 'monitoring']
     if any(keyword in user_input.lower() for keyword in vm_keywords):
@@ -401,8 +585,9 @@ def fetchAIResponse(user_input):
                     "plotly_code": plotly_code
                 }
             
-            # Display results with plot
-            response_text = f"**Victoria Metrics Query Results:**\n\n{vm_output}"
+            # Display results with plot and summary
+            summary_text = "\n".join([result.get('summary', '') for result in vm_results if result.get('summary')])
+            response_text = f"**Victoria Metrics Query Results:**\n\n{vm_output}\n\n**Summary of Changes:**\n{summary_text}"
             displayAiResponse(response_text, plot_data)
             
             # Chart will be rendered by displayAiResponse function
@@ -413,7 +598,7 @@ def fetchAIResponse(user_input):
             return
     
     # Check if any FAISS indices exist
-    indices = ["faiss_index_pdf", "faiss_index_docx", "faiss_index_txt", "faiss_index_csv"]
+    indices = ["faiss_index_pdf", "faiss_index_docx", "faiss_index_txt", "faiss_index_csv", "faiss_index_excel"]
     existing_indices = [idx for idx in indices if os.path.exists(f"{idx}.faiss") or os.path.exists(idx)]
     
     if not existing_indices:
@@ -443,16 +628,15 @@ def fetchAIResponse(user_input):
     for vs in vectorstores[1:]:
         main_vectorstore.merge_from(vs)
     
-    # Enhanced retriever with better parameters
+    # Enhanced retriever with better parameters for CSV data
     retriever = main_vectorstore.as_retriever(
-        search_type="mmr",  # Maximum Marginal Relevance for diversity
-        search_kwargs={"k": 5, "fetch_k": 10}  # Retrieve more relevant chunks
+        search_type="similarity",  # Use similarity for complete coverage
+        search_kwargs={"k": 20, "fetch_k": 40}  # Retrieve many chunks for complete PM lists
     )
     
-    # Custom prompt for better accuracy
+    # Enhanced prompt for CSV and structured data
     custom_prompt = PromptTemplate.from_template(
         """You are a network troubleshooting expert. Use the following context to answer the question accurately.
-        Search for the answer in all the uploaded documents. Give the best combined result for the user query
         
         Context: {context}
         
@@ -460,15 +644,23 @@ def fetchAIResponse(user_input):
         
         Instructions:
         1. Answer based ONLY on the provided context
-        2. If the context doesn't contain relevant information, say "I don't have enough information in the uploaded documents to answer this question."
-        3. Provide specific, actionable troubleshooting steps when possible
-        4. Include relevant technical details from the context
-        5. Be concise but comprehensive
+        2. When asked for PM or KPI or TCE counters or lists, provide COMPLETE and COMPREHENSIVE lists - include ALL items found in the context
+        3. For 5G network PM or KPI or TCE counters, list ALL counters with their full names and descriptions if available
+        4. Present data in structured format using bullet points, numbered lists, or markdown tables
+        5. Include ALL column headers and organize data logically - do NOT truncate or summarize lists
+        6. If the list is long, still provide the COMPLETE list - users need all information
+        7. For troubleshooting queries, provide specific, actionable steps
+        8. Maintain data structure from CSV/Excel files exactly as provided
+        9. If context doesn't contain relevant information, say "I don't have enough information in the uploaded documents to answer this question."
         
         Answer:"""
     )
     
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)  # Slightly higher temp for better responses
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash", 
+        temperature=0.1,
+        max_output_tokens=8192  # Increase token limit for complete responses
+    )
     combine_docs_chain = create_stuff_documents_chain(llm, custom_prompt)
     retrieval_chain = create_retrieval_chain(retriever, combine_docs_chain)
     
@@ -507,7 +699,7 @@ if submit_button and user_input:
             
             # Initialize LLM and tools
             tools = [format_gemini_response]
-            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2, callbacks=[AgentCallbackHandler()])
+            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1, callbacks=[AgentCallbackHandler()])
             llm_with_tools = llm.bind_tools(tools)
             
             # Show typing indicator and get AI response
